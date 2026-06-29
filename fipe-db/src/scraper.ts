@@ -1,7 +1,6 @@
 /**
  * PLACAFY — Scraper FIPE Oficial
- * Acessa veiculos.fipe.org.br e extrai todos os dados para carros.
- * Roda 1x por mês via GitHub Actions.
+ * Usa headers de browser para não ser bloqueado
  */
 
 import axios from "axios";
@@ -9,12 +8,20 @@ import * as fs from "fs";
 import * as path from "path";
 
 const FIPE_API = "https://veiculos.fipe.org.br/api/veiculos";
+
+// Headers que simulam um browser real
 const FIPE_HEADERS = {
   "Content-Type": "application/json",
-  "Referer": "https://veiculos.fipe.org.br",
-  "Host": "veiculos.fipe.org.br",
+  "Referer": "https://veiculos.fipe.org.br/",
   "Origin": "https://veiculos.fipe.org.br",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
   "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+  "Accept-Encoding": "gzip, deflate, br",
+  "Connection": "keep-alive",
+  "Sec-Fetch-Dest": "empty",
+  "Sec-Fetch-Mode": "cors",
+  "Sec-Fetch-Site": "same-origin",
 };
 
 const DB_PATH = path.join(__dirname, "../data/fipe.json");
@@ -22,17 +29,23 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
 async function post(endpoint: string, body: object, tentativa = 1): Promise<any> {
   try {
+    // Delay aleatório entre requisições (simula humano)
+    await sleep(500 + Math.random() * 1000);
+
     const res = await axios.post(`${FIPE_API}/${endpoint}`, body, {
-      headers: FIPE_HEADERS, timeout: 15000,
+      headers: FIPE_HEADERS,
+      timeout: 20000,
     });
     return res.data;
   } catch (err: any) {
+    const status = err?.response?.status;
     if (tentativa < 4) {
-      const wait = tentativa * 3000;
-      console.warn(`  ⚠️  Erro em ${endpoint}. Aguardando ${wait/1000}s... (${tentativa}/3)`);
+      const wait = tentativa * 5000;
+      console.warn(`  ⚠️  Erro ${status} em ${endpoint}. Aguardando ${wait/1000}s... (${tentativa}/3)`);
       await sleep(wait);
       return post(endpoint, body, tentativa + 1);
     }
+    console.error(`  ❌ Falha em ${endpoint}: status=${status} msg=${err.message}`);
     return null;
   }
 }
@@ -45,24 +58,31 @@ async function main() {
   }
 
   // 1. Referência atual
+  console.log("📅 Buscando tabela de referência...");
   const refs = await post("ConsultarTabelaDeReferencia", {});
-  if (!refs?.length) { console.error("❌ Erro ao buscar referências"); process.exit(1); }
+  if (!refs?.length) {
+    console.error("❌ Erro ao buscar referências — site pode estar bloqueando");
+    process.exit(1);
+  }
   const ref = refs[0];
   console.log(`✅ Referência: ${ref.Mes} (código: ${ref.Codigo})\n`);
 
   // 2. Marcas
+  console.log("🏎️  Buscando marcas...");
   const marcas = await post("ConsultarMarcas", {
     codigoTabelaReferencia: ref.Codigo,
     codigoTipoVeiculo: 1,
   });
-  if (!marcas?.length) { console.error("❌ Erro ao buscar marcas"); process.exit(1); }
+  if (!marcas?.length) {
+    console.error("❌ Erro ao buscar marcas");
+    process.exit(1);
+  }
   console.log(`✅ ${marcas.length} marcas encontradas\n`);
 
-  // Estrutura do banco JSON
-  const banco: Record<string, any> = {
+  const banco: any = {
     referencia: { codigo: ref.Codigo, mes: ref.Mes },
     geradoEm: new Date().toISOString(),
-    veiculos: [] as any[],
+    veiculos: [],
   };
 
   let total = 0;
@@ -73,6 +93,9 @@ async function main() {
     const pct = Math.round(((mi + 1) / marcas.length) * 100);
     console.log(`[${pct}%] ${marca.Label} (${mi + 1}/${marcas.length})`);
 
+    // Delay maior entre marcas
+    await sleep(1000 + Math.random() * 2000);
+
     const modData = await post("ConsultarModelos", {
       codigoTabelaReferencia: ref.Codigo,
       codigoTipoVeiculo: 1,
@@ -82,7 +105,6 @@ async function main() {
 
     for (const modelo of modData.Modelos) {
       const modeloId = parseInt(modelo.Value);
-      await sleep(200);
 
       const anosData = await post("ConsultarAnoModelo", {
         codigoTabelaReferencia: ref.Codigo,
@@ -96,7 +118,6 @@ async function main() {
         const parts = ano.Value.split("-");
         const anoModelo = parseInt(parts[0]);
         const codCombustivel = parseInt(parts[1]);
-        await sleep(150);
 
         const detalhe = await post("ConsultarValorComTodosParametros", {
           codigoTabelaReferencia: ref.Codigo,
@@ -112,14 +133,15 @@ async function main() {
         if (!detalhe?.CodigoFipe) continue;
 
         const valor = parseFloat(
-          (detalhe.Valor || "0").replace("R$","").replace(/\./g,"").replace(",",".").trim()
+          (detalhe.Valor || "0")
+            .replace("R$","").replace(/\./g,"").replace(",",".").trim()
         );
 
         banco.veiculos.push({
           codigoFipe:    detalhe.CodigoFipe,
           nomeMarca:     detalhe.Marca,
           nomeModelo:    detalhe.Modelo,
-          anoModelo:     anoModelo,
+          anoModelo,
           combustivel:   detalhe.Combustivel,
           valor,
           mesReferencia: detalhe.MesReferencia?.trim(),
@@ -130,23 +152,18 @@ async function main() {
       }
     }
 
-    // Salva parcialmente a cada marca (segurança)
+    // Salva a cada 5 marcas
     if (mi % 5 === 0) {
       fs.writeFileSync(DB_PATH, JSON.stringify(banco));
-      console.log(`  💾 Salvo parcialmente: ${total} veículos`);
+      console.log(`  💾 ${total} veículos salvos`);
     }
   }
 
-  // Salva final
   fs.writeFileSync(DB_PATH, JSON.stringify(banco));
-
-  console.log(`\n✅ Scraping concluído!`);
-  console.log(`📊 Total: ${total} veículos`);
-  console.log(`💾 Salvo em: ${DB_PATH}`);
-  console.log(`📦 Tamanho: ${(fs.statSync(DB_PATH).size / 1024 / 1024).toFixed(1)} MB`);
+  console.log(`\n✅ Concluído! ${total} veículos em ${DB_PATH}`);
 }
 
 main().catch(err => {
-  console.error("❌ Erro fatal:", err);
+  console.error("❌ Erro fatal:", err.message);
   process.exit(1);
 });
