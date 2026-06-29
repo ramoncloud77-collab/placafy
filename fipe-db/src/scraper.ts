@@ -1,86 +1,59 @@
 /**
- * PLACAFY — Scraper FIPE Oficial
- * Usa headers de browser para não ser bloqueado
+ * PLACAFY — Scraper FIPE via parallelum.com.br
+ * API pública, sem bloqueio, sem autenticação necessária.
+ * Roda 1x por mês via GitHub Actions.
  */
 
 import axios from "axios";
 import * as fs from "fs";
 import * as path from "path";
 
-const FIPE_API = "https://veiculos.fipe.org.br/api/veiculos";
-
-// Headers que simulam um browser real
-const FIPE_HEADERS = {
-  "Content-Type": "application/json",
-  "Referer": "https://veiculos.fipe.org.br/",
-  "Origin": "https://veiculos.fipe.org.br",
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-  "Accept": "application/json, text/plain, */*",
-  "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-  "Accept-Encoding": "gzip, deflate, br",
-  "Connection": "keep-alive",
-  "Sec-Fetch-Dest": "empty",
-  "Sec-Fetch-Mode": "cors",
-  "Sec-Fetch-Site": "same-origin",
-};
-
+const BASE = "https://fipe.parallelum.com.br/api/v2";
 const DB_PATH = path.join(__dirname, "../data/fipe.json");
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-async function post(endpoint: string, body: object, tentativa = 1): Promise<any> {
+async function get(url: string, tentativa = 1): Promise<any> {
   try {
-    // Delay aleatório entre requisições (simula humano)
-    await sleep(500 + Math.random() * 1000);
-
-    const res = await axios.post(`${FIPE_API}/${endpoint}`, body, {
-      headers: FIPE_HEADERS,
-      timeout: 20000,
+    await sleep(300 + Math.random() * 500);
+    const res = await axios.get(url, {
+      timeout: 15000,
+      headers: { Accept: "application/json" },
     });
     return res.data;
   } catch (err: any) {
-    const status = err?.response?.status;
     if (tentativa < 4) {
-      const wait = tentativa * 5000;
-      console.warn(`  ⚠️  Erro ${status} em ${endpoint}. Aguardando ${wait/1000}s... (${tentativa}/3)`);
+      const wait = tentativa * 3000;
+      console.warn(`  ⚠️  Erro em ${url}. Aguardando ${wait/1000}s... (${tentativa}/3)`);
       await sleep(wait);
-      return post(endpoint, body, tentativa + 1);
+      return get(url, tentativa + 1);
     }
-    console.error(`  ❌ Falha em ${endpoint}: status=${status} msg=${err.message}`);
+    console.error(`  ❌ Falha: ${url} → ${err.message}`);
     return null;
   }
 }
 
 async function main() {
-  console.log("🚀 PLACAFY — Scraper FIPE\n");
+  console.log("🚀 PLACAFY — Scraper FIPE (parallelum)\n");
 
   if (!fs.existsSync(path.dirname(DB_PATH))) {
     fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
   }
 
   // 1. Referência atual
-  console.log("📅 Buscando tabela de referência...");
-  const refs = await post("ConsultarTabelaDeReferencia", {});
-  if (!refs?.length) {
-    console.error("❌ Erro ao buscar referências — site pode estar bloqueando");
-    process.exit(1);
-  }
+  console.log("📅 Buscando referência atual...");
+  const refs = await get(`${BASE}/references`);
+  if (!refs?.length) { console.error("❌ Erro ao buscar referências"); process.exit(1); }
   const ref = refs[0];
-  console.log(`✅ Referência: ${ref.Mes} (código: ${ref.Codigo})\n`);
+  console.log(`✅ Referência: ${ref.month} (código: ${ref.code})\n`);
 
-  // 2. Marcas
+  // 2. Marcas de carros
   console.log("🏎️  Buscando marcas...");
-  const marcas = await post("ConsultarMarcas", {
-    codigoTabelaReferencia: ref.Codigo,
-    codigoTipoVeiculo: 1,
-  });
-  if (!marcas?.length) {
-    console.error("❌ Erro ao buscar marcas");
-    process.exit(1);
-  }
+  const marcas = await get(`${BASE}/cars/brands`);
+  if (!marcas?.length) { console.error("❌ Erro ao buscar marcas"); process.exit(1); }
   console.log(`✅ ${marcas.length} marcas encontradas\n`);
 
   const banco: any = {
-    referencia: { codigo: ref.Codigo, mes: ref.Mes },
+    referencia: { codigo: ref.code, mes: ref.month },
     geradoEm: new Date().toISOString(),
     veiculos: [],
   };
@@ -89,78 +62,59 @@ async function main() {
 
   for (let mi = 0; mi < marcas.length; mi++) {
     const marca = marcas[mi];
-    const marcaId = parseInt(marca.Value);
     const pct = Math.round(((mi + 1) / marcas.length) * 100);
-    console.log(`[${pct}%] ${marca.Label} (${mi + 1}/${marcas.length})`);
+    process.stdout.write(`[${pct}%] ${marca.name} (${mi + 1}/${marcas.length})... `);
 
-    // Delay maior entre marcas
-    await sleep(1000 + Math.random() * 2000);
+    // Modelos da marca
+    const modelos = await get(`${BASE}/cars/brands/${marca.code}/models`);
+    if (!modelos?.length) { console.log("sem modelos"); continue; }
 
-    const modData = await post("ConsultarModelos", {
-      codigoTabelaReferencia: ref.Codigo,
-      codigoTipoVeiculo: 1,
-      codigoMarca: marcaId,
-    });
-    if (!modData?.Modelos?.length) continue;
+    for (const modelo of modelos) {
+      // Anos do modelo
+      const anos = await get(`${BASE}/cars/brands/${marca.code}/models/${modelo.code}/years`);
+      if (!anos?.length) continue;
 
-    for (const modelo of modData.Modelos) {
-      const modeloId = parseInt(modelo.Value);
-
-      const anosData = await post("ConsultarAnoModelo", {
-        codigoTabelaReferencia: ref.Codigo,
-        codigoTipoVeiculo: 1,
-        codigoMarca: marcaId,
-        codigoModelo: modeloId,
-      });
-      if (!anosData?.length) continue;
-
-      for (const ano of anosData) {
-        const parts = ano.Value.split("-");
-        const anoModelo = parseInt(parts[0]);
-        const codCombustivel = parseInt(parts[1]);
-
-        const detalhe = await post("ConsultarValorComTodosParametros", {
-          codigoTabelaReferencia: ref.Codigo,
-          codigoTipoVeiculo: 1,
-          codigoMarca: marcaId,
-          codigoModelo: modeloId,
-          ano: anoModelo,
-          codigoTipoCombustivel: codCombustivel,
-          anoModelo: anoModelo,
-          tipoConsulta: "tradicional",
-        });
-
-        if (!detalhe?.CodigoFipe) continue;
-
-        const valor = parseFloat(
-          (detalhe.Valor || "0")
-            .replace("R$","").replace(/\./g,"").replace(",",".").trim()
+      for (const ano of anos) {
+        // Detalhe com preço
+        const detalhe = await get(
+          `${BASE}/cars/brands/${marca.code}/models/${modelo.code}/years/${ano.code}`
         );
+        if (!detalhe?.price) continue;
+
+        const parsePrice = (s: any) => {
+          if (typeof s === "number") return s;
+          return parseFloat(String(s).replace(/[^\d,]/g,"").replace(",",".")) || 0;
+        };
 
         banco.veiculos.push({
-          codigoFipe:    detalhe.CodigoFipe,
-          nomeMarca:     detalhe.Marca,
-          nomeModelo:    detalhe.Modelo,
-          anoModelo,
-          combustivel:   detalhe.Combustivel,
-          valor,
-          mesReferencia: detalhe.MesReferencia?.trim(),
-          idMarca:       marcaId,
-          idModelo:      modeloId,
+          codigoFipe:    detalhe.codeFipe || "",
+          nomeMarca:     detalhe.brand || marca.name,
+          nomeModelo:    detalhe.model || modelo.name,
+          anoModelo:     parseInt(ano.code?.split("-")[0]) || 0,
+          combustivel:   detalhe.fuel || "",
+          valor:         parsePrice(detalhe.price),
+          mesReferencia: detalhe.referenceMonth || ref.month,
+          idMarca:       marca.code,
+          idModelo:      modelo.code,
         });
         total++;
       }
     }
 
+    console.log(`${modelos.length} modelos`);
+
     // Salva a cada 5 marcas
     if (mi % 5 === 0) {
       fs.writeFileSync(DB_PATH, JSON.stringify(banco));
-      console.log(`  💾 ${total} veículos salvos`);
     }
   }
 
   fs.writeFileSync(DB_PATH, JSON.stringify(banco));
-  console.log(`\n✅ Concluído! ${total} veículos em ${DB_PATH}`);
+
+  const sizeMB = (fs.statSync(DB_PATH).size / 1024 / 1024).toFixed(1);
+  console.log(`\n✅ Concluído!`);
+  console.log(`📊 Total: ${total} veículos`);
+  console.log(`💾 Arquivo: ${DB_PATH} (${sizeMB} MB)`);
 }
 
 main().catch(err => {
