@@ -1,0 +1,42 @@
+name: Scrape FIPE Mensal
+
+on:
+  schedule:
+    - cron: '0 13 2 * *'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout repositório
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Instalar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Instalar dependências
+        working-directory: fipe-db
+        run: npm install
+
+      - name: Criar pasta data
+        working-directory: fipe-db
+        run: mkdir -p data
+
+      - name: Rodar scraper FIPE
+        working-directory: fipe-db
+        run: npx ts-node --transpile-only src/scraper.ts
+
+      - name: Commit e push do fipe.json
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add fipe-db/data/fipe.json
+          git commit -m "atualiza fipe.json - $(date '+%B/%Y')" || echo "Sem mudanças"
+          git push
